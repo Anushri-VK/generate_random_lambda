@@ -5,7 +5,7 @@ import logging
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 from sklearn.model_selection import train_test_split
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.svm import SVC
 from sklearn.metrics import classification_report, accuracy_score
 import pandas as pd
 import numpy as np
@@ -16,6 +16,11 @@ logger.setLevel(logging.INFO)
 
 # Initialize S3 client
 s3 = boto3.client('s3')
+
+# Set random seed for reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
 
 # Generate the data
 def generate_lambda_data(num_records):
@@ -34,6 +39,17 @@ def generate_lambda_data(num_records):
             invocation_count = min(10000, invocation_count + random.randint(0, 5000))
         if error_rate > 2:
             cold_start_count = min(10, cold_start_count + random.randint(0, 5))
+
+             # Edge cases for hard-to-recognize faulty data
+        if random.random() < 0.05:  # 5% chance to create edge case
+            if random.random() < 0.5:
+                # Slightly above threshold
+                error_rate = 1.01
+            else:
+                # Slightly below threshold
+                memory_usage_mb = 4999
+                cold_start_count = 8
+                invocation_count = 6999
         
         record = {
             "timestamp": time.time(),
@@ -87,7 +103,7 @@ def lambda_handler(event, context):
     }
 
 if __name__ == "__main__":
-    num_records = 100  # Number of data records to generate
+    num_records = 1000  # Number of data records to generate
     filename = "lambda_function_data.json"
     lambda_data = generate_lambda_data(num_records)
     save_data_to_json(lambda_data, filename)
@@ -102,35 +118,46 @@ if __name__ == "__main__":
     # Convert to DataFrame
     df = pd.DataFrame(data)
 
-    # Separate features and labels
-    X = df.drop(columns=["timestamp", "faulty"])
+   
+   # Select the features and target variable
+    X = df[["execution_time_ms", "memory_usage_mb", "invocation_count", "error_rate", "cold_start_count"]]
     y = df["faulty"]
 
-    # Split the data into training and test sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Split the data multiple times with different splits and train/test the SVM model
+    splits = [
+        (0, 700, 700, 1000),
+        (200, 900, 0, 200),
+        (500, 1200, 0, 500),
+        (300, 1000, 0, 300)
+    ]
 
-    # Train the Decision Tree model
-    clf = DecisionTreeClassifier(random_state=42)
-    clf.fit(X_train, y_train)
+    for split in splits:
+        train_start, train_end, test_start, test_end = split
+        X_train, X_test = pd.concat([X.iloc[train_start:train_end], X.iloc[test_start:test_end]]), pd.concat([X.iloc[test_end:], X.iloc[:test_start]])
+        y_train, y_test = pd.concat([y.iloc[train_start:train_end], y.iloc[test_start:test_end]]), pd.concat([y.iloc[test_end:], y.iloc[:test_start]])
 
-    # Predict on the test set
-    y_pred = clf.predict(X_test)
+        # Ensure there are no empty test sets
+        if X_test.shape[0] == 0 or y_test.shape[0] == 0:
+            continue
 
-    # Evaluate the model
-    accuracy = accuracy_score(y_test, y_pred) * 100
-    report = classification_report(y_test, y_pred, output_dict=True)
+        # Train the SVM model
+        clf = SVC(kernel='linear', random_state=42)
+        clf.fit(X_train, y_train)
 
-    # Convert classification report to percentage
-    for key in report:
-        if key not in ["accuracy", "macro avg", "weighted avg"]:
-            for metric in report[key]:
-                report[key][metric] *= 100
+        # Predict and evaluate
+        y_pred = clf.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        report = classification_report(y_test, y_pred, target_names=["Non-Faulty", "Faulty"], output_dict=True)
 
-    # Display results
-    print(f"Accuracy: {accuracy:.2f}%")
-    print("Classification Report:")
-    for label, metrics in report.items():
-        if label not in ["accuracy", "macro avg", "weighted avg"]:
-            print(f"Class {label}:")
-            for metric, value in metrics.items():
-                print(f"  {metric}: {value:.2f}%")
+        # Print the results
+        print(f"Split {splits.index(split) + 1}: Training from {train_start} to {train_end}, Testing from {test_start} to {test_end}")
+        print(f"Accuracy: {accuracy * 100:.2f}%")
+        print("Classification Report:")
+        for label, metrics in report.items():
+            if label in ["Non-Faulty", "Faulty"]:
+                print(f"Class {label}:")
+                print(f"  Precision: {metrics['precision'] * 100:.2f}%")
+                print(f"  Recall: {metrics['recall'] * 100:.2f}%")
+                print(f"  F1-score: {metrics['f1-score'] * 100:.2f}%")
+                print(f"  Support: {metrics['support']}")
+        print("\n==================================================\n")
