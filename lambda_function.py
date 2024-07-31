@@ -4,11 +4,7 @@ import time
 import logging
 import boto3
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
-from sklearn.model_selection import train_test_split
-from sklearn.svm import SVC
-from sklearn.metrics import classification_report, accuracy_score
-import pandas as pd
-import numpy as np
+
 
 # Configure logging
 logger = logging.getLogger()
@@ -17,10 +13,6 @@ logger.setLevel(logging.INFO)
 # Initialize S3 client
 s3 = boto3.client('s3')
 
-# Set random seed for reproducibility
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
 
 # Generate the data
 def generate_lambda_data(num_records):
@@ -86,7 +78,7 @@ def upload_to_s3(file_path, bucket_name, object_name):
         logger.error("Incomplete credentials")
 
 def lambda_handler(event, context):
-    num_records = event.get("num_records", 100)  # Default to 100 if not specified in the event
+    num_records = event.get("num_records", 1000)  # Default to 1000 if not specified in the event
     filename = "/tmp/lambda_function_data.json"  # Lambda has limited writable storage in /tmp directory
     lambda_data = generate_lambda_data(num_records)
     save_data_to_json(lambda_data, filename)
@@ -108,56 +100,3 @@ if __name__ == "__main__":
     lambda_data = generate_lambda_data(num_records)
     save_data_to_json(lambda_data, filename)
     print(f"Generated {num_records} records of Lambda function data and saved to {filename}")
-
-
-    # Load the generated data for training
-    with open(filename, 'r') as f:
-        data = json.load(f)
-
-
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-
-   
-   # Select the features and target variable
-    X = df[["execution_time_ms", "memory_usage_mb", "invocation_count", "error_rate", "cold_start_count"]]
-    y = df["faulty"]
-
-    # Split the data multiple times with different splits and train/test the SVM model
-    splits = [
-        (0, 700, 700, 1000),
-        (200, 900, 0, 200),
-        (500, 1200, 0, 500),
-        (300, 1000, 0, 300)
-    ]
-
-    for split in splits:
-        train_start, train_end, test_start, test_end = split
-        X_train, X_test = pd.concat([X.iloc[train_start:train_end], X.iloc[test_start:test_end]]), pd.concat([X.iloc[test_end:], X.iloc[:test_start]])
-        y_train, y_test = pd.concat([y.iloc[train_start:train_end], y.iloc[test_start:test_end]]), pd.concat([y.iloc[test_end:], y.iloc[:test_start]])
-
-        # Ensure there are no empty test sets
-        if X_test.shape[0] == 0 or y_test.shape[0] == 0:
-            continue
-
-        # Train the SVM model
-        clf = SVC(kernel='linear', random_state=42)
-        clf.fit(X_train, y_train)
-
-        # Predict and evaluate
-        y_pred = clf.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred, target_names=["Non-Faulty", "Faulty"], output_dict=True)
-
-        # Print the results
-        print(f"Split {splits.index(split) + 1}: Training from {train_start} to {train_end}, Testing from {test_start} to {test_end}")
-        print(f"Accuracy: {accuracy * 100:.2f}%")
-        print("Classification Report:")
-        for label, metrics in report.items():
-            if label in ["Non-Faulty", "Faulty"]:
-                print(f"Class {label}:")
-                print(f"  Precision: {metrics['precision'] * 100:.2f}%")
-                print(f"  Recall: {metrics['recall'] * 100:.2f}%")
-                print(f"  F1-score: {metrics['f1-score'] * 100:.2f}%")
-                print(f"  Support: {metrics['support']}")
-        print("\n==================================================\n")
